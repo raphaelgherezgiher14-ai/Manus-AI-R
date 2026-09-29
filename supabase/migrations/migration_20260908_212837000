@@ -1,0 +1,25 @@
+create or replace function public.is_company_member(company uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select exists (
+    select 1 from public.profiles p
+    where p.id = auth.uid()
+      and p.company_id = company
+      and p.role = 'business'
+  );
+$$;
+
+drop policy if exists "companies_select" on public.companies;
+create policy "companies_select" on public.companies for select using (
+  public.is_admin()
+  or public.is_company_member(id)
+  or exists (
+    select 1 from public.customers c
+    where c.company_id = companies.id
+      and c.email = (select email from auth.users where id = auth.uid())
+  )
+);

@@ -1,0 +1,3 @@
+update public.profiles set full_name = 'Platform Admin', role = 'admin', company_id = null, language = 'en' where id = '00000000-0000-4000-8000-000000000001';
+update public.profiles set full_name = 'Anna Schneider', role = 'business', company_id = '00000000-0000-4000-8000-000000000101', language = 'de' where id = '00000000-0000-4000-8000-000000000002';
+update public.profiles set full_name = 'Lena Hoffmann', role = 'customer', company_id = '00000000-0000-4000-8000-000000000101', language = 'de' where id = '00000000-0000-4000-8000-000000000003';

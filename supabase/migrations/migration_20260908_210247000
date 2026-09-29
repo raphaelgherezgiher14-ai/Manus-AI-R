@@ -1,0 +1,139 @@
+create table public.quotes (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id) on delete cascade,
+  customer_id uuid not null references public.customers(id) on delete cascade,
+  project_id uuid references public.projects(id) on delete set null,
+  number text not null,
+  title text not null,
+  status text not null default 'draft' check (status in ('draft', 'sent', 'accepted', 'declined', 'expired')),
+  issue_date date not null default current_date,
+  valid_until date,
+  deposit_percent numeric(5,2) not null default 20,
+  notes text,
+  total numeric(14,2) not null default 0,
+  currency text not null default 'EUR',
+  pdf_url text,
+  created_at timestamptz not null default now()
+);
+
+create table public.quote_items (
+  id uuid primary key default gen_random_uuid(),
+  quote_id uuid not null references public.quotes(id) on delete cascade,
+  description text not null,
+  quantity numeric(12,2) not null default 1,
+  unit_price numeric(14,2) not null default 0,
+  amount numeric(14,2) not null default 0,
+  sort_order integer not null default 0
+);
+
+create table public.invoices (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id) on delete cascade,
+  customer_id uuid not null references public.customers(id) on delete cascade,
+  project_id uuid references public.projects(id) on delete set null,
+  quote_id uuid references public.quotes(id) on delete set null,
+  phase_id uuid references public.project_phases(id) on delete set null,
+  number text not null,
+  type text not null default 'progress' check (type in ('deposit', 'progress', 'final')),
+  status text not null default 'draft' check (status in ('draft', 'sent', 'paid', 'overdue', 'canceled')),
+  issue_date date not null default current_date,
+  due_date date,
+  total numeric(14,2) not null default 0,
+  amount_paid numeric(14,2) not null default 0,
+  currency text not null default 'EUR',
+  notes text,
+  pdf_url text,
+  created_at timestamptz not null default now()
+);
+
+create table public.invoice_items (
+  id uuid primary key default gen_random_uuid(),
+  invoice_id uuid not null references public.invoices(id) on delete cascade,
+  description text not null,
+  quantity numeric(12,2) not null default 1,
+  unit_price numeric(14,2) not null default 0,
+  amount numeric(14,2) not null default 0,
+  sort_order integer not null default 0
+);
+
+create table public.payments (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id) on delete cascade,
+  customer_id uuid not null references public.customers(id) on delete cascade,
+  invoice_id uuid not null references public.invoices(id) on delete cascade,
+  amount numeric(14,2) not null default 0,
+  method text not null default 'card' check (method in ('card', 'sepa', 'bank_transfer')),
+  status text not null default 'succeeded' check (status in ('succeeded', 'pending', 'failed')),
+  paid_at timestamptz,
+  reference text,
+  created_at timestamptz not null default now()
+);
+
+alter table public.quotes enable row level security;
+alter table public.quote_items enable row level security;
+alter table public.invoices enable row level security;
+alter table public.invoice_items enable row level security;
+alter table public.payments enable row level security;
+
+create or replace function public.is_company_doc(company uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select public.is_admin() or public.is_company_member(company);
+$$;
+
+-- quotes
+create policy "quotes_select" on public.quotes for select using (public.is_company_doc(company_id) or public.is_customer_owner(customer_id));
+create policy "quotes_insert" on public.quotes for insert with check (public.is_company_doc(company_id));
+create policy "quotes_update" on public.quotes for update using (public.is_company_doc(company_id));
+create policy "quotes_delete" on public.quotes for delete using (public.is_company_doc(company_id));
+
+-- quote_items
+create policy "quote_items_select" on public.quote_items for select using (
+  exists (select 1 from public.quotes q where q.id = quote_id and (public.is_company_doc(q.company_id) or public.is_customer_owner(q.customer_id)))
+);
+create policy "quote_items_insert" on public.quote_items for insert with check (
+  exists (select 1 from public.quotes q where q.id = quote_id and public.is_company_doc(q.company_id))
+);
+create policy "quote_items_update" on public.quote_items for update using (
+  exists (select 1 from public.quotes q where q.id = quote_id and public.is_company_doc(q.company_id))
+);
+create policy "quote_items_delete" on public.quote_items for delete using (
+  exists (select 1 from public.quotes q where q.id = quote_id and public.is_company_doc(q.company_id))
+);
+
+-- invoices
+create policy "invoices_select" on public.invoices for select using (public.is_company_doc(company_id) or public.is_customer_owner(customer_id));
+create policy "invoices_insert" on public.invoices for insert with check (public.is_company_doc(company_id));
+create policy "invoices_update" on public.invoices for update using (public.is_company_doc(company_id) or public.is_customer_owner(customer_id));
+create policy "invoices_delete" on public.invoices for delete using (public.is_company_doc(company_id));
+
+-- invoice_items
+create policy "invoice_items_select" on public.invoice_items for select using (
+  exists (select 1 from public.invoices i where i.id = invoice_id and (public.is_company_doc(i.company_id) or public.is_customer_owner(i.customer_id)))
+);
+create policy "invoice_items_insert" on public.invoice_items for insert with check (
+  exists (select 1 from public.invoices i where i.id = invoice_id and public.is_company_doc(i.company_id))
+);
+create policy "invoice_items_update" on public.invoice_items for update using (
+  exists (select 1 from public.invoices i where i.id = invoice_id and public.is_company_doc(i.company_id))
+);
+create policy "invoice_items_delete" on public.invoice_items for delete using (
+  exists (select 1 from public.invoices i where i.id = invoice_id and public.is_company_doc(i.company_id))
+);
+
+-- payments
+create policy "payments_select" on public.payments for select using (public.is_company_doc(company_id) or public.is_customer_owner(customer_id));
+create policy "payments_insert" on public.payments for insert with check (public.is_company_doc(company_id) or public.is_customer_owner(customer_id));
+create policy "payments_update" on public.payments for update using (public.is_company_doc(company_id) or public.is_customer_owner(customer_id));
+create policy "payments_delete" on public.payments for delete using (public.is_company_doc(company_id) or public.is_customer_owner(customer_id));
+
+create index if not exists quotes_company_idx on public.quotes(company_id);
+create index if not exists quotes_customer_idx on public.quotes(customer_id);
+create index if not exists invoices_company_idx on public.invoices(company_id);
+create index if not exists invoices_customer_idx on public.invoices(customer_id);
+create index if not exists invoices_project_idx on public.invoices(project_id);
+create index if not exists payments_invoice_idx on public.payments(invoice_id);

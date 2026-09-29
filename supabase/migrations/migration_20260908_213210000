@@ -1,0 +1,3 @@
+delete from public.companies where name like 'Flow Test%';
+delete from auth.identities where user_id in (select id from auth.users where email = 'newworkflow@payalarm.app');
+delete from auth.users where email = 'newworkflow@payalarm.app';

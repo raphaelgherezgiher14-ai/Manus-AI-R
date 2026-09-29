@@ -1,0 +1,20 @@
+create or replace function public.get_my_email()
+returns text
+language sql
+security definer
+set search_path = public
+stable
+as $$
+  select email from auth.users where id = auth.uid();
+$$;
+
+drop policy if exists "companies_select" on public.companies;
+create policy "companies_select" on public.companies for select using (
+  public.is_admin()
+  or public.is_company_member(id)
+  or exists (
+    select 1 from public.customers c
+    where c.company_id = companies.id
+      and c.email = public.get_my_email()
+  )
+);

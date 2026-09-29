@@ -1,0 +1,387 @@
+-- ---------------------------------------------------------------------------
+-- 1) Tax / banking fields
+-- ---------------------------------------------------------------------------
+alter table public.companies
+  add column if not exists vat_status text not null default 'regelbesteuert' check (vat_status in ('kleinunternehmer', 'regelbesteuert')),
+  add column if not exists default_vat_rate numeric(5,2) not null default 19 check (default_vat_rate in (7, 19)),
+  add column if not exists tax_number text,
+  add column if not exists iban text,
+  add column if not exists bic text,
+  add column if not exists bank_name text;
+
+alter table public.quotes
+  add column if not exists vat_rate numeric(5,2),
+  add column if not exists net_total numeric(14,2) not null default 0,
+  add column if not exists vat_amount numeric(14,2) not null default 0;
+
+alter table public.invoices
+  add column if not exists vat_rate numeric(5,2),
+  add column if not exists net_total numeric(14,2) not null default 0,
+  add column if not exists vat_amount numeric(14,2) not null default 0,
+  add column if not exists service_date date;
+
+-- Backfill: existing amounts assumed gross incl. 19% VAT
+update public.quotes set
+  vat_rate = 19,
+  net_total = round(total / 1.19, 2),
+  vat_amount = total - round(total / 1.19, 2)
+where total > 0;
+
+update public.invoices set
+  vat_rate = 19,
+  net_total = round(total / 1.19, 2),
+  vat_amount = total - round(total / 1.19, 2),
+  service_date = issue_date
+where total > 0;
+update public.invoices set service_date = issue_date where service_date is null;
+
+update public.companies set
+  vat_status = 'regelbesteuert',
+  default_vat_rate = 19,
+  tax_number = 'DE123456789',
+  iban = 'DE89370400440532013000',
+  bic = 'COBADEFFXXX',
+  bank_name = 'Commerzbank Berlin'
+where id = '00000000-0000-4000-8000-000000000101';
+
+-- ---------------------------------------------------------------------------
+-- 2) Magic link table
+-- ---------------------------------------------------------------------------
+create table public.share_links (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id) on delete cascade,
+  document_type text not null check (document_type in ('quote', 'invoice')),
+  quote_id uuid references public.quotes(id) on delete cascade,
+  invoice_id uuid references public.invoices(id) on delete cascade,
+  token text not null unique,
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  check (
+    (document_type = 'quote' and quote_id is not null and invoice_id is null)
+    or (document_type = 'invoice' and invoice_id is not null and quote_id is null)
+  )
+);
+
+alter table public.share_links enable row level security;
+create policy "share_links_select" on public.share_links for select using (public.is_admin() or public.is_company_member(company_id));
+create policy "share_links_insert" on public.share_links for insert with check (public.is_admin() or public.is_company_member(company_id));
+create policy "share_links_update" on public.share_links for update using (public.is_admin() or public.is_company_member(company_id));
+create policy "share_links_delete" on public.share_links for delete using (public.is_admin() or public.is_company_member(company_id));
+create index if not exists share_links_token_idx on public.share_links(token);
+create index if not exists share_links_invoice_idx on public.share_links(invoice_id);
+create index if not exists share_links_quote_idx on public.share_links(quote_id);
+
+-- ---------------------------------------------------------------------------
+-- 3) RPC: resolve document by magic link (anon) — security definer, token-gated
+-- ---------------------------------------------------------------------------
+create or replace function public.get_document_by_token(p_token text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+stable
+as $$
+declare
+  link record;
+  result jsonb;
+begin
+  select * into link from public.share_links where token = p_token;
+  if not found then
+    return null;
+  end if;
+
+  if link.document_type = 'invoice' then
+    select jsonb_build_object(
+      'document_type', 'invoice',
+      'invoice', to_jsonb(i) || jsonb_build_object(
+        'items', coalesce((select jsonb_agg(to_jsonb(ii) order by ii.sort_order) from public.invoice_items ii where ii.invoice_id = i.id), '[]'::jsonb)
+      ),
+      'customer', to_jsonb(c),
+      'company', to_jsonb(co),
+      'vat', jsonb_build_object(
+        'vat_status', co.vat_status,
+        'vat_rate', i.vat_rate,
+        'net_total', i.net_total,
+        'vat_amount', i.vat_amount,
+        'gross_total', i.total
+      ),
+      'deposits', coalesce((
+        select jsonb_agg(jsonb_build_object('number', d.number, 'net_total', d.net_total, 'vat_amount', d.vat_amount, 'total', d.total, 'status', d.status))
+        from public.invoices d
+        where d.quote_id = i.quote_id and d.id <> i.id and d.type = 'deposit' and d.status = 'paid'
+      ), '[]'::jsonb),
+      'payments', coalesce((
+        select jsonb_agg(jsonb_build_object('method', pm.method, 'status', pm.status, 'amount', pm.amount, 'paid_at', pm.paid_at) order by pm.paid_at)
+        from public.payments pm where pm.invoice_id = i.id
+      ), '[]'::jsonb),
+      'pay_options', jsonb_build_object(
+        'card_enabled', coalesce((select enabled from public.payment_methods where company_id = co.id and kind = 'card' limit 1), true),
+        'sepa_enabled', coalesce((select enabled from public.payment_methods where company_id = co.id and kind = 'sepa' limit 1), true),
+        'iban', co.iban,
+        'bic', co.bic,
+        'bank_name', co.bank_name
+      )
+    ) into result
+    from public.invoices i
+    join public.customers c on c.id = i.customer_id
+    join public.companies co on co.id = i.company_id
+    where i.id = link.invoice_id;
+  else
+    select jsonb_build_object(
+      'document_type', 'quote',
+      'quote', to_jsonb(q) || jsonb_build_object(
+        'items', coalesce((select jsonb_agg(to_jsonb(qi) order by qi.sort_order) from public.quote_items qi where qi.quote_id = q.id), '[]'::jsonb)
+      ),
+      'customer', to_jsonb(c),
+      'company', to_jsonb(co),
+      'vat', jsonb_build_object(
+        'vat_status', co.vat_status,
+        'vat_rate', q.vat_rate,
+        'net_total', q.net_total,
+        'vat_amount', q.vat_amount,
+        'gross_total', q.total
+      )
+    ) into result
+    from public.quotes q
+    join public.customers c on c.id = q.customer_id
+    join public.companies co on co.id = q.company_id
+    where q.id = link.quote_id;
+  end if;
+
+  return result;
+end;
+$$;
+
+grant execute on function public.get_document_by_token(text) to anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 4) RPC: record invoice payment (anon via magic link)
+-- ---------------------------------------------------------------------------
+create or replace function public.record_invoice_payment(p_token text, p_method text, p_reference text, p_succeeded boolean)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  link record;
+  inv public.invoices%rowtype;
+  balance numeric;
+begin
+  select * into link from public.share_links where token = p_token;
+  if not found or link.document_type <> 'invoice' then
+    return jsonb_build_object('ok', false, 'error', 'invalid_link');
+  end if;
+
+  select * into inv from public.invoices where id = link.invoice_id;
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'not_found');
+  end if;
+
+  if inv.status = 'paid' then
+    return jsonb_build_object('ok', true, 'already_paid', true);
+  end if;
+
+  if p_reference is not null and exists (
+    select 1 from public.payments where reference = p_reference and invoice_id = inv.id
+  ) then
+    return jsonb_build_object('ok', true, 'already_recorded', true);
+  end if;
+
+  balance := round((inv.total - inv.amount_paid)::numeric, 2);
+
+  insert into public.payments (company_id, customer_id, invoice_id, amount, method, status, paid_at, reference)
+  values (
+    inv.company_id, inv.customer_id, inv.id, balance, p_method,
+    case when p_succeeded then 'succeeded' else 'pending' end,
+    case when p_succeeded then now() else null end,
+    coalesce(p_reference, 'magiclink_' || gen_random_uuid()::text)
+  );
+
+  if p_succeeded then
+    update public.invoices set amount_paid = inv.total, status = 'paid' where id = inv.id;
+  end if;
+
+  insert into public.audit_logs (company_id, actor_id, actor_role, action, entity, entity_id, details)
+  values (inv.company_id, null, 'customer', 'payment.recorded', 'invoices', inv.id,
+    jsonb_build_object('number', inv.number, 'amount', balance, 'method', p_method, 'succeeded', p_succeeded, 'source', 'magic_link'));
+
+  insert into public.notifications (user_id, title_en, title_de, body_en, body_de, type)
+  select u.id,
+    'Payment received', 'Zahlung eingegangen',
+    'Payment of ' || balance::text || ' EUR reported for ' || inv.number || '.',
+    'Zahlung über ' || balance::text || ' EUR für ' || inv.number || ' gemeldet.',
+    'payment'
+  from public.profiles u
+  where u.company_id = inv.company_id and u.role = 'business';
+
+  return jsonb_build_object('ok', true, 'pending', not p_succeeded);
+end;
+$$;
+
+grant execute on function public.record_invoice_payment(text, text, text, boolean) to anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 5) RPC: decide quote via magic link (accept -> auto deposit invoice with VAT)
+-- ---------------------------------------------------------------------------
+create or replace function public.decide_quote(p_token text, p_status text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  link record;
+  q public.quotes%rowtype;
+  co public.companies%rowtype;
+  proj public.projects%rowtype;
+  deposit_net numeric;
+  deposit_vat numeric;
+  deposit_gross numeric;
+  invno text;
+  inv public.invoices%rowtype;
+  seq int;
+begin
+  select * into link from public.share_links where token = p_token;
+  if not found or link.document_type <> 'quote' then
+    return jsonb_build_object('ok', false, 'error', 'invalid_link');
+  end if;
+  select * into q from public.quotes where id = link.quote_id;
+  if not found then
+    return jsonb_build_object('ok', false, 'error', 'not_found');
+  end if;
+  if q.status <> 'sent' then
+    return jsonb_build_object('ok', true, 'already_decided', true, 'status', q.status);
+  end if;
+  if p_status not in ('accepted', 'declined') then
+    return jsonb_build_object('ok', false, 'error', 'bad_status');
+  end if;
+
+  update public.quotes set status = p_status where id = q.id;
+
+  insert into public.audit_logs (company_id, actor_id, actor_role, action, entity, entity_id, details)
+  values (q.company_id, null, 'customer', 'quote.' || p_status, 'quotes', q.id, jsonb_build_object('number', q.number));
+
+  if p_status = 'accepted' then
+    select * into co from public.companies where id = q.company_id;
+    select * into proj from public.projects where id = q.project_id;
+    deposit_net := round((q.net_total * q.deposit_percent / 100)::numeric, 2);
+    if co.vat_status = 'regelbesteuert' then
+      deposit_vat := round((deposit_net * coalesce(q.vat_rate, co.default_vat_rate) / 100)::numeric, 2);
+    else
+      deposit_vat := 0;
+    end if;
+    deposit_gross := round((deposit_net + deposit_vat)::numeric, 2);
+
+    select coalesce(max((regexp_match(number, '(\d+)$'))[1]::int), 0) + 1 into seq
+    from public.invoices where company_id = q.company_id;
+    invno := 'INV-' || extract(year from now())::int || '-' || lpad(seq::text, 4, '0');
+
+    insert into public.invoices (company_id, customer_id, project_id, quote_id, number, type, status, issue_date, due_date, service_date, total, net_total, vat_amount, vat_rate, amount_paid, currency, notes)
+    values (
+      q.company_id, q.customer_id, q.project_id, q.id, invno, 'deposit', 'sent',
+      current_date, current_date + coalesce(proj.deposit_due_days, 14), current_date,
+      deposit_gross, deposit_net, deposit_vat,
+      case when co.vat_status = 'regelbesteuert' then coalesce(q.vat_rate, co.default_vat_rate) else null end,
+      0, q.currency, 'Anzahlungsrechnung zu ' || q.number
+    )
+    returning * into inv;
+
+    insert into public.invoice_items (invoice_id, description, quantity, unit_price, amount, sort_order)
+    values (inv.id, 'Anzahlung (' || q.deposit_percent::text || '%) – ' || q.title, 1, deposit_net, deposit_net, 1);
+
+    insert into public.audit_logs (company_id, actor_id, actor_role, action, entity, entity_id, details)
+    values (q.company_id, null, 'customer', 'invoice.created', 'invoices', inv.id, jsonb_build_object('number', invno, 'type', 'deposit'));
+  end if;
+
+  return jsonb_build_object('ok', true, 'status', p_status);
+end;
+$$;
+
+grant execute on function public.decide_quote(text, text) to anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 6) RPC: ensure (or create) a magic link token (business users)
+-- ---------------------------------------------------------------------------
+create or replace function public.ensure_share_link(p_doc_type text, p_doc_id uuid)
+returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  company uuid;
+  existing_token text;
+  token_text text;
+begin
+  if p_doc_type = 'invoice' then
+    select company_id into company from public.invoices where id = p_doc_id;
+  elsif p_doc_type = 'quote' then
+    select company_id into company from public.quotes where id = p_doc_id;
+  else
+    return null;
+  end if;
+
+  if company is null then
+    return null;
+  end if;
+
+  select token into existing_token from public.share_links
+  where document_type = p_doc_type
+    and ((p_doc_type = 'quote' and quote_id = p_doc_id) or (p_doc_type = 'invoice' and invoice_id = p_doc_id))
+  limit 1;
+  if existing_token is not null then
+    return existing_token;
+  end if;
+
+  token_text := encode(gen_random_bytes(24), 'hex');
+  insert into public.share_links (company_id, document_type, quote_id, invoice_id, token, created_by)
+  values (
+    company, p_doc_type,
+    case when p_doc_type = 'quote' then p_doc_id else null end,
+    case when p_doc_type = 'invoice' then p_doc_id else null end,
+    token_text, auth.uid()
+  );
+  return token_text;
+end;
+$$;
+
+grant execute on function public.ensure_share_link(text, uuid) to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 7) RPC: regenerate a magic link token (business users)
+-- ---------------------------------------------------------------------------
+create or replace function public.regenerate_share_link(p_doc_type text, p_doc_id uuid)
+returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  company uuid;
+  token_text text;
+begin
+  if p_doc_type = 'invoice' then
+    select company_id into company from public.invoices where id = p_doc_id;
+  elsif p_doc_type = 'quote' then
+    select company_id into company from public.quotes where id = p_doc_id;
+  else
+    return null;
+  end if;
+  if company is null then
+    return null;
+  end if;
+
+  token_text := encode(gen_random_bytes(24), 'hex');
+  insert into public.share_links (company_id, document_type, quote_id, invoice_id, token, created_by)
+  values (
+    company, p_doc_type,
+    case when p_doc_type = 'quote' then p_doc_id else null end,
+    case when p_doc_type = 'invoice' then p_doc_id else null end,
+    token_text, auth.uid()
+  );
+  return token_text;
+end;
+$$;
+
+grant execute on function public.regenerate_share_link(text, uuid) to authenticated;

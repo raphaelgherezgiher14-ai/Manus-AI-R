@@ -1,0 +1,103 @@
+-- 1) customers.note (Notizfeld) - additive, same business
+alter table public.customers
+  add column if not exists note text;
+
+-- 2) RPC: find invoice by number + customer email -> share link token (anon)
+create or replace function public.find_invoice_link(p_number text, p_email text)
+returns text
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  inv_id uuid;
+  comp uuid;
+  existing_token text;
+  token_text text;
+begin
+  if p_number is null or p_email is null
+     or trim(p_number) = '' or trim(p_email) = '' then
+    return null;
+  end if;
+
+  select i.id, i.company_id into inv_id, comp
+  from public.invoices i
+  join public.customers c on c.id = i.customer_id
+  where i.number = trim(p_number)
+    and lower(c.email) = lower(trim(p_email))
+  limit 1;
+
+  if inv_id is null then
+    return null;
+  end if;
+
+  select token into existing_token from public.share_links
+  where document_type = 'invoice' and invoice_id = inv_id
+  limit 1;
+  if existing_token is not null then
+    return existing_token;
+  end if;
+
+  token_text := replace(gen_random_uuid()::text, '-', '') || replace(gen_random_uuid()::text, '-', '');
+  insert into public.share_links (company_id, document_type, invoice_id, token)
+  values (comp, 'invoice', inv_id, token_text);
+  return token_text;
+end;
+$$;
+
+grant execute on function public.find_invoice_link(text, text) to anon, authenticated;
+
+-- 3) RPC: verify admin invite code (anon)
+create or replace function public.verify_admin_invite(p_code text)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+stable
+as $$
+declare
+  expected text;
+begin
+  if p_code is null or trim(p_code) = '' then
+    return false;
+  end if;
+  select value ->> 'code' into expected
+  from public.settings
+  where company_id is null and key = 'admin_invite'
+  limit 1;
+  return expected is not null and expected = trim(p_code);
+end;
+$$;
+
+grant execute on function public.verify_admin_invite(text) to anon, authenticated;
+
+insert into public.settings (company_id, key, value)
+values (null, 'admin_invite', '{"code": "PAYALARM-ADMIN-2026"}'::jsonb)
+on conflict (company_id, key) do nothing;
+
+-- 4) subscription_payments: money the platform receives from companies
+create table if not exists public.subscription_payments (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id) on delete cascade,
+  plan text not null default 'professional' check (plan in ('professional', 'business')),
+  amount numeric(14,2) not null default 0,
+  currency text not null default 'EUR',
+  status text not null default 'succeeded' check (status in ('succeeded', 'pending', 'failed')),
+  stripe_session_id text,
+  paid_at timestamptz not null default now(),
+  created_at timestamptz not null default now()
+);
+
+alter table public.subscription_payments enable row level security;
+
+create policy "sp_admin_select" on public.subscription_payments
+  for select using (public.is_admin());
+create policy "sp_admin_insert" on public.subscription_payments
+  for insert with check (public.is_admin());
+create policy "sp_admin_update" on public.subscription_payments
+  for update using (public.is_admin());
+create policy "sp_admin_delete" on public.subscription_payments
+  for delete using (public.is_admin());
+
+create index if not exists sp_company_idx on public.subscription_payments(company_id);
+create index if not exists sp_paid_idx on public.subscription_payments(paid_at);

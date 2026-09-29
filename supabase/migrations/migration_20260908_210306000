@@ -1,0 +1,245 @@
+create table public.reminder_configs (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id) on delete cascade,
+  name text not null,
+  enabled boolean not null default true,
+  days_before_due integer not null default 3,
+  frequency_days integer not null default 7,
+  max_reminders integer not null default 3,
+  subject_en text,
+  subject_de text,
+  body_en text,
+  body_de text,
+  created_at timestamptz not null default now()
+);
+
+create table public.reminders (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id) on delete cascade,
+  invoice_id uuid not null references public.invoices(id) on delete cascade,
+  sequence integer not null default 1,
+  scheduled_date date,
+  channel text not null default 'email',
+  status text not null default 'scheduled' check (status in ('scheduled', 'sent', 'skipped', 'failed')),
+  sent_at timestamptz,
+  delivery text not null default 'email' check (delivery in ('email', 'simulated')),
+  created_at timestamptz not null default now()
+);
+
+create table public.dunning_rules (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id) on delete cascade,
+  name text not null,
+  level integer not null default 1,
+  trigger_days_overdue integer not null default 7,
+  action text not null default 'email_reminder' check (action in ('email_reminder', 'escalation_notice', 'final_notice')),
+  subject_en text,
+  subject_de text,
+  body_en text,
+  body_de text,
+  enabled boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+create table public.dunning_events (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id) on delete cascade,
+  invoice_id uuid not null references public.invoices(id) on delete cascade,
+  rule_id uuid references public.dunning_rules(id) on delete set null,
+  level integer not null default 1,
+  action_taken text not null,
+  created_at timestamptz not null default now()
+);
+
+create table public.messages (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id) on delete cascade,
+  customer_id uuid not null references public.customers(id) on delete cascade,
+  project_id uuid references public.projects(id) on delete set null,
+  sender_id uuid references auth.users(id) on delete set null,
+  sender_role text not null default 'business' check (sender_role in ('business', 'customer')),
+  content text not null,
+  created_at timestamptz not null default now()
+);
+
+create table public.documents (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id) on delete cascade,
+  customer_id uuid references public.customers(id) on delete cascade,
+  project_id uuid references public.projects(id) on delete set null,
+  name text not null,
+  kind text not null default 'other' check (kind in ('contract', 'brief', 'report', 'other')),
+  url text,
+  created_at timestamptz not null default now()
+);
+
+create table public.payment_methods (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id) on delete cascade,
+  name text not null,
+  kind text not null default 'card' check (kind in ('card', 'sepa', 'bank_transfer')),
+  enabled boolean not null default true,
+  config jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create table public.integrations (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id) on delete cascade,
+  name text not null,
+  kind text not null default 'email' check (kind in ('email', 'accounting', 'crm')),
+  enabled boolean not null default false,
+  config jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create table public.subscriptions (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references public.companies(id) on delete cascade,
+  plan text not null default 'professional' check (plan in ('professional', 'business')),
+  status text not null default 'trialing' check (status in ('trialing', 'active', 'canceled', 'past_due')),
+  trial_start timestamptz,
+  trial_end timestamptz,
+  period_start timestamptz,
+  period_end timestamptz,
+  stripe_session_id text,
+  created_at timestamptz not null default now()
+);
+
+create table public.roles (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid references public.companies(id) on delete cascade,
+  name text not null,
+  description text,
+  is_system boolean not null default false,
+  permissions jsonb not null default '[]'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create table public.settings (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid references public.companies(id) on delete cascade,
+  key text not null,
+  value jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  unique (company_id, key)
+);
+
+create table public.audit_logs (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid references public.companies(id) on delete cascade,
+  actor_id uuid references auth.users(id) on delete set null,
+  actor_role text,
+  action text not null,
+  entity text,
+  entity_id uuid,
+  details jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create table public.notifications (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  title_en text not null,
+  title_de text not null,
+  body_en text,
+  body_de text,
+  type text not null default 'info' check (type in ('info', 'payment', 'reminder', 'dunning', 'system')),
+  read boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+-- RLS
+
+alter table public.reminder_configs enable row level security;
+alter table public.reminders enable row level security;
+alter table public.dunning_rules enable row level security;
+alter table public.dunning_events enable row level security;
+alter table public.messages enable row level security;
+alter table public.documents enable row level security;
+alter table public.payment_methods enable row level security;
+alter table public.integrations enable row level security;
+alter table public.subscriptions enable row level security;
+alter table public.roles enable row level security;
+alter table public.settings enable row level security;
+alter table public.audit_logs enable row level security;
+alter table public.notifications enable row level security;
+
+-- reminder_configs
+create policy "rc_select" on public.reminder_configs for select using (public.is_company_doc(company_id));
+create policy "rc_insert" on public.reminder_configs for insert with check (public.is_company_doc(company_id));
+create policy "rc_update" on public.reminder_configs for update using (public.is_company_doc(company_id));
+create policy "rc_delete" on public.reminder_configs for delete using (public.is_company_doc(company_id));
+
+-- reminders
+create policy "reminders_select" on public.reminders for select using (public.is_company_doc(company_id) or public.is_customer_owner((select customer_id from public.invoices where id = invoice_id)));
+create policy "reminders_insert" on public.reminders for insert with check (public.is_company_doc(company_id));
+create policy "reminders_update" on public.reminders for update using (public.is_company_doc(company_id));
+create policy "reminders_delete" on public.reminders for delete using (public.is_company_doc(company_id));
+
+-- dunning_rules
+create policy "dr_select" on public.dunning_rules for select using (public.is_company_doc(company_id));
+create policy "dr_insert" on public.dunning_rules for insert with check (public.is_company_doc(company_id));
+create policy "dr_update" on public.dunning_rules for update using (public.is_company_doc(company_id));
+create policy "dr_delete" on public.dunning_rules for delete using (public.is_company_doc(company_id));
+
+-- dunning_events
+create policy "de_select" on public.dunning_events for select using (public.is_company_doc(company_id) or public.is_customer_owner((select customer_id from public.invoices where id = invoice_id)));
+create policy "de_insert" on public.dunning_events for insert with check (public.is_company_doc(company_id));
+create policy "de_delete" on public.dunning_events for delete using (public.is_company_doc(company_id));
+
+-- messages
+create policy "messages_select" on public.messages for select using (public.is_company_doc(company_id) or public.is_customer_owner(customer_id));
+create policy "messages_insert" on public.messages for insert with check (public.is_company_doc(company_id) or public.is_customer_owner(customer_id));
+create policy "messages_delete" on public.messages for delete using (public.is_company_doc(company_id));
+
+-- documents
+create policy "documents_select" on public.documents for select using (public.is_company_doc(company_id) or public.is_customer_owner(customer_id));
+create policy "documents_insert" on public.documents for insert with check (public.is_company_doc(company_id) or public.is_customer_owner(customer_id));
+create policy "documents_delete" on public.documents for delete using (public.is_company_doc(company_id));
+
+-- payment_methods
+create policy "pm_select" on public.payment_methods for select using (public.is_company_doc(company_id));
+create policy "pm_insert" on public.payment_methods for insert with check (public.is_company_doc(company_id));
+create policy "pm_update" on public.payment_methods for update using (public.is_company_doc(company_id));
+create policy "pm_delete" on public.payment_methods for delete using (public.is_company_doc(company_id));
+
+-- integrations
+create policy "integrations_select" on public.integrations for select using (public.is_company_doc(company_id));
+create policy "integrations_insert" on public.integrations for insert with check (public.is_company_doc(company_id));
+create policy "integrations_update" on public.integrations for update using (public.is_company_doc(company_id));
+create policy "integrations_delete" on public.integrations for delete using (public.is_company_doc(company_id));
+
+-- subscriptions
+create policy "subscriptions_select" on public.subscriptions for select using (public.is_company_doc(company_id));
+create policy "subscriptions_insert" on public.subscriptions for insert with check (public.is_company_doc(company_id));
+create policy "subscriptions_update" on public.subscriptions for update using (public.is_company_doc(company_id));
+create policy "subscriptions_delete" on public.subscriptions for delete using (public.is_company_doc(company_id));
+
+-- roles
+create policy "roles_select" on public.roles for select using (public.is_admin() or public.is_company_member(company_id) or company_id is null);
+create policy "roles_insert" on public.roles for insert with check (public.is_admin() or public.is_company_member(company_id));
+create policy "roles_update" on public.roles for update using (public.is_admin() or public.is_company_member(company_id));
+create policy "roles_delete" on public.roles for delete using (public.is_admin() or public.is_company_member(company_id));
+
+-- settings
+create policy "settings_select" on public.settings for select using (public.is_admin() or public.is_company_member(company_id));
+create policy "settings_insert" on public.settings for insert with check (public.is_admin() or public.is_company_member(company_id));
+create policy "settings_update" on public.settings for update using (public.is_admin() or public.is_company_member(company_id));
+create policy "settings_delete" on public.settings for delete using (public.is_admin() or public.is_company_member(company_id));
+
+-- audit_logs
+create policy "audit_select" on public.audit_logs for select using (public.is_admin() or public.is_company_member(company_id));
+create policy "audit_insert" on public.audit_logs for insert with check (public.is_admin() or public.is_company_member(company_id) or (company_id is null and public.is_admin()));
+
+-- notifications
+create policy "notif_select" on public.notifications for select using (user_id = auth.uid());
+create policy "notif_update" on public.notifications for update using (user_id = auth.uid());
+create policy "notif_delete" on public.notifications for delete using (user_id = auth.uid());
+create policy "notif_insert" on public.notifications for insert with check (public.is_admin() or user_id = auth.uid());
+
+create index if not exists reminders_invoice_idx on public.reminders(invoice_id);
+create index if not exists dunning_invoice_idx on public.dunning_events(invoice_id);
+create index if not exists messages_customer_idx on public.messages(customer_id);
+create index if not exists audit_company_idx on public.audit_logs(company_id);
+create index if not exists notif_user_idx on public.notifications(user_id);

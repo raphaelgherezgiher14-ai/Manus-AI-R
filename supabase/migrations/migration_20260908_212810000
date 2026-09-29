@@ -1,0 +1,13 @@
+update public.profiles set full_name = 'Platform Admin', role = 'admin', company_id = null, language = 'en' where id = '1dddd9e6-9bae-49fc-858d-0951dc3c95ea';
+update public.profiles set full_name = 'Anna Schneider', role = 'business', company_id = '00000000-0000-4000-8000-000000000101', language = 'de' where id = 'ee7b156e-0dd3-458e-aa20-f97c4d3ffca2';
+update public.profiles set full_name = 'Lena Hoffmann', role = 'customer', company_id = '00000000-0000-4000-8000-000000000101', language = 'de' where id = 'b3bd2883-8e4f-4d69-9c66-cc7417bf703e';
+
+update public.audit_logs set actor_id = 'ee7b156e-0dd3-458e-aa20-f97c4d3ffca2' where actor_id = '00000000-0000-4000-8000-000000000002';
+update public.audit_logs set actor_id = 'b3bd2883-8e4f-4d69-9c66-cc7417bf703e' where actor_id = '00000000-0000-4000-8000-000000000003';
+update public.messages set sender_id = 'ee7b156e-0dd3-458e-aa20-f97c4d3ffca2' where sender_id = '00000000-0000-4000-8000-000000000002';
+update public.messages set sender_id = 'b3bd2883-8e4f-4d69-9c66-cc7417bf703e' where sender_id = '00000000-0000-4000-8000-000000000003';
+
+insert into public.notifications (id, user_id, title_en, title_de, body_en, body_de, type, read) values
+('00000000-0000-4000-8000-000000000E51', 'ee7b156e-0dd3-458e-aa20-f97c4d3ffca2', 'Payment received', 'Zahlung eingegangen', 'Payment of €4,850.00 received for INV-2026-0008.', 'Zahlung über 4.850,00 € für INV-2026-0008 eingegangen.', 'payment', true),
+('00000000-0000-4000-8000-000000000E52', 'b3bd2883-8e4f-4d69-9c66-cc7417bf703e', 'New invoice available', 'Neue Rechnung verfügbar', 'Invoice INV-2026-0004 is due.', 'Rechnung INV-2026-0004 ist fällig.', 'reminder', false)
+on conflict (id) do nothing;

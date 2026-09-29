@@ -1,0 +1,5 @@
+-- Platform-wide settings (company_id IS NULL) need their own uniqueness:
+-- the existing UNIQUE (company_id, key) does not apply when company_id is NULL.
+create unique index if not exists settings_platform_key_idx
+  on public.settings (key)
+  where company_id is null;

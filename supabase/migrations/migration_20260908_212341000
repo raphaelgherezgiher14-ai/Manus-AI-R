@@ -1,0 +1,5 @@
+drop policy if exists "companies_insert" on public.companies;
+create policy "companies_insert" on public.companies for insert with check (
+  public.is_admin()
+  or exists (select 1 from public.profiles p where p.id = auth.uid() and p.role = 'business')
+);

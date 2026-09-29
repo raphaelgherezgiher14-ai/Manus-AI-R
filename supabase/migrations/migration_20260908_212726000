@@ -1,0 +1,1 @@
+update auth.users set instance_id = '00000000-0000-0000-0000-000000000000' where email in ('admin@payalarm.app', 'business@payalarm.app', 'customer@payalarm.app');

@@ -1,0 +1,2 @@
+delete from auth.identities where user_id in (select id from auth.users where email in ('admin@payalarm.app', 'business@payalarm.app', 'customer@payalarm.app', 'testuser@payalarm.app'));
+delete from auth.users where email in ('admin@payalarm.app', 'business@payalarm.app', 'customer@payalarm.app', 'testuser@payalarm.app');
