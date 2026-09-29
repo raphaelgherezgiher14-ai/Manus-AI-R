@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Download, FileText, FolderOpen, Plus } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 
@@ -53,27 +53,73 @@ const Documents = () => {
   const [kind, setKind] = useState("contract");
   const [customerId, setCustomerId] = useState("");
   const [url, setUrl] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [nameError, setNameError] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const savingRef = useRef(false);
 
   const create = async () => {
-    if (!companyId || !name.trim()) return;
-    await supabase.from("documents").insert({
-      company_id: companyId,
-      customer_id: customerId || null,
-      name: name.trim(),
-      kind,
-      url: url.trim() || null,
-    });
-    await logAudit({
+    if (savingRef.current) return;
+    setFormError(null);
+
+    if (!companyId) {
+      toast.error(t("app.documents.companyRequired"));
+      return;
+    }
+
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      setNameError(true);
+      toast.error(t("app.documents.nameRequired"));
+      return;
+    }
+
+    savingRef.current = true;
+    setSaving(true);
+    try {
+      const { error } = await supabase.from("documents").insert({
+        company_id: companyId,
+        customer_id: customerId || null,
+        name: trimmedName,
+        kind,
+        url: url.trim() || null,
+      });
+      if (error) throw error;
+    } catch (error) {
+      const detail =
+        typeof error === "object" && error !== null && "message" in error
+          ? String(error.message)
+          : String(error);
+      const message = t("app.documents.createError");
+      setFormError(detail ? `${message} ${detail}` : message);
+      toast.error(message, { description: detail || undefined });
+      return;
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+
+    void logAudit({
       companyId,
       action: "document.created",
       entity: "documents",
-      details: { name },
-    });
+      details: { name: trimmedName },
+    }).catch(() => undefined);
     toast.success(t("app.documents.created"));
     setOpen(false);
     setName("");
+    setKind("contract");
+    setCustomerId("");
     setUrl("");
-    await queryClient.invalidateQueries({ queryKey: ["documents"] });
+    setNameError(false);
+    setFormError(null);
+    void queryClient.invalidateQueries({ queryKey: ["documents"] });
+  };
+
+  const openCreateDialog = () => {
+    setNameError(false);
+    setFormError(null);
+    setOpen(true);
   };
 
   const openDocument = (row: Doc) => {
@@ -128,7 +174,7 @@ const Documents = () => {
         title={t("app.documents.title")}
         subtitle={t("app.documents.subtitle")}
         actions={
-          <Button onClick={() => setOpen(true)}>
+          <Button onClick={openCreateDialog}>
             <Plus className="h-4 w-4" />
             {t("app.documents.add")}
           </Button>
@@ -146,21 +192,54 @@ const Documents = () => {
             title={t("common.empty")}
             description={t("app.documents.emptyDesc")}
             action={
-              <Button onClick={() => setOpen(true)}>{t("app.documents.add")}</Button>
+              <Button onClick={openCreateDialog}>{t("app.documents.add")}</Button>
             }
           />
         }
       />
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog
+        open={open}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen && savingRef.current) return;
+          setOpen(nextOpen);
+          if (nextOpen) {
+            setNameError(false);
+            setFormError(null);
+          }
+        }}
+      >
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
             <DialogTitle>{t("app.documents.add")}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4">
+            {!companyId ? (
+              <p role="alert" className="text-sm text-destructive">
+                {t("app.documents.companyRequired")}
+              </p>
+            ) : null}
+            {formError ? (
+              <p role="alert" className="text-sm text-destructive">
+                {formError}
+              </p>
+            ) : null}
             <div className="space-y-1.5">
               <Label>{t("common.name")}</Label>
-              <Input value={name} onChange={(e) => setName(e.target.value)} />
+              <Input
+                value={name}
+                required
+                aria-invalid={nameError}
+                onChange={(e) => {
+                  setName(e.target.value);
+                  if (e.target.value.trim()) setNameError(false);
+                }}
+              />
+              {nameError ? (
+                <p role="alert" className="text-xs text-destructive">
+                  {t("app.documents.nameRequired")}
+                </p>
+              ) : null}
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
@@ -208,10 +287,12 @@ const Documents = () => {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>
+            <Button variant="outline" disabled={saving} onClick={() => setOpen(false)}>
               {t("common.cancel")}
             </Button>
-            <Button onClick={() => void create()}>{t("common.create")}</Button>
+            <Button disabled={saving} onClick={() => void create()}>
+              {saving ? t("app.documents.saving") : t("common.create")}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
