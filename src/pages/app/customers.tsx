@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { FileSignature, Pencil, Plus, Search, UserRound } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
@@ -80,6 +80,9 @@ const Customers = () => {
   const [editing, setEditing] = useState<Customer | null>(null);
   const [form, setForm] = useState<CustomerFormState>(emptyForm);
   const [saving, setSaving] = useState(false);
+  const [nameError, setNameError] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const savingRef = useRef(false);
 
   // Per-customer derived stats
   const stats = (customers ?? []).map((c) => {
@@ -98,6 +101,8 @@ const Customers = () => {
   const openCreate = () => {
     setEditing(null);
     setForm(emptyForm);
+    setNameError(false);
+    setSaveError(null);
     setDialogOpen(true);
   };
 
@@ -114,22 +119,36 @@ const Customers = () => {
       tax_id: customer.tax_id ?? "",
       language: customer.language,
     });
+    setNameError(false);
+    setSaveError(null);
     setDialogOpen(true);
   };
 
   const save = async () => {
-    if (!companyId) return;
-    if (!form.name.trim()) {
-      toast.error(t("common.required"));
+    if (savingRef.current) return;
+    setSaveError(null);
+
+    if (!companyId) {
+      toast.error(t("app.customers.companyRequired"));
       return;
     }
+
+    const name = form.name.trim();
+    if (!name) {
+      setNameError(true);
+      toast.error(t("app.customers.nameRequired"));
+      return;
+    }
+
+    savingRef.current = true;
     setSaving(true);
+    let customerId = editing?.id;
     try {
       if (editing) {
-        await supabase
+        const { error } = await supabase
           .from("customers")
           .update({
-            name: form.name.trim(),
+            name,
             contact_name: form.contact_name.trim() || null,
             email: form.email.trim() || null,
             phone: form.phone.trim() || null,
@@ -140,20 +159,13 @@ const Customers = () => {
             language: form.language,
           })
           .eq("id", editing.id);
-        await logAudit({
-          companyId,
-          action: "customer.updated",
-          entity: "customers",
-          entityId: editing.id,
-          details: { name: form.name },
-        });
-        toast.success(t("app.customers.updated"));
+        if (error) throw error;
       } else {
-        const { data } = await supabase
+        const { data, error } = await supabase
           .from("customers")
           .insert({
             company_id: companyId,
-            name: form.name.trim(),
+            name,
             contact_name: form.contact_name.trim() || null,
             email: form.email.trim() || null,
             phone: form.phone.trim() || null,
@@ -165,22 +177,37 @@ const Customers = () => {
           })
           .select()
           .single();
-        await logAudit({
-          companyId,
-          action: "customer.created",
-          entity: "customers",
-          entityId: data?.id,
-          details: { name: form.name },
-        });
-        toast.success(t("app.customers.created"));
+        if (error) throw error;
+        if (!data) throw new Error(t("app.customers.saveError"));
+        customerId = data.id;
       }
-      setDialogOpen(false);
-      await queryClient.invalidateQueries({ queryKey: ["customers"] });
-    } catch {
-      toast.error(t("auth.genericError"));
+    } catch (error) {
+      const detail =
+        typeof error === "object" && error !== null && "message" in error
+          ? String(error.message)
+          : String(error);
+      const message = t("app.customers.saveError");
+      setSaveError(detail ? `${message} ${detail}` : message);
+      toast.error(message, { description: detail || undefined });
+      return;
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
+
+    void logAudit({
+      companyId,
+      action: editing ? "customer.updated" : "customer.created",
+      entity: "customers",
+      entityId: customerId,
+      details: { name },
+    }).catch(() => undefined);
+    toast.success(t(editing ? "app.customers.updated" : "app.customers.created"));
+    setDialogOpen(false);
+    setForm(emptyForm);
+    setNameError(false);
+    setSaveError(null);
+    void queryClient.invalidateQueries({ queryKey: ["customers"] });
   };
 
   const filtered = stats
@@ -347,7 +374,13 @@ const Customers = () => {
         }
       />
 
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+      <Dialog
+        open={dialogOpen}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen && savingRef.current) return;
+          setDialogOpen(nextOpen);
+        }}
+      >
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
           <DialogHeader>
             <DialogTitle>
@@ -355,13 +388,32 @@ const Customers = () => {
             </DialogTitle>
           </DialogHeader>
           <div className="grid gap-4">
+            {!companyId ? (
+              <p role="alert" className="text-sm text-destructive">
+                {t("app.customers.companyRequired")}
+              </p>
+            ) : null}
+            {saveError ? (
+              <p role="alert" className="text-sm text-destructive">
+                {saveError}
+              </p>
+            ) : null}
             <div className="space-y-1.5">
               <Label>{t("common.name")}</Label>
               <Input
                 value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                aria-invalid={nameError}
+                onChange={(e) => {
+                  setForm({ ...form, name: e.target.value });
+                  if (e.target.value.trim()) setNameError(false);
+                }}
                 required
               />
+              {nameError ? (
+                <p role="alert" className="text-xs text-destructive">
+                  {t("app.customers.nameRequired")}
+                </p>
+              ) : null}
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <div className="space-y-1.5">
@@ -438,7 +490,7 @@ const Customers = () => {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)}>
+            <Button variant="outline" disabled={saving} onClick={() => setDialogOpen(false)}>
               {t("common.cancel")}
             </Button>
             <Button onClick={() => void save()} disabled={saving}>
